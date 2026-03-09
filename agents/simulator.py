@@ -138,17 +138,16 @@ def _pairwise_confidence(dist_a: list, dist_b: list) -> float:
 def _vs_field_confidence(winner_dist: list, all_dists: list) -> float:
     """
     P(winner beats ALL other creatives simultaneously).
-    For each draw index, winner must beat every other arm's draw.
+    Truncates all dists to shortest length — bandit gives different n_simulations
+    per creative so arrays are unequal length, causing numpy broadcast errors.
     """
-    w  = np.array(winner_dist)
-    n  = len(w)
-    others = [np.array(d[:n]) for d in all_dists]
-
-    if not others:
+    if not all_dists:
         return 1.0
-
-    # Stack all competitors: shape (n_others, n_draws)
-    stacked   = np.stack(others, axis=0)           # (K-1, n)
+    # Truncate everything to the shortest distribution
+    n = min(len(winner_dist), min(len(d) for d in all_dists))
+    w       = np.array(winner_dist[:n])
+    others  = [np.array(d[:n]) for d in all_dists]
+    stacked   = np.stack(others, axis=0)                     # (K-1, n)
     beats_all = np.all(w[np.newaxis, :] > stacked, axis=0)  # (n,)
     return float(np.mean(beats_all))
 
