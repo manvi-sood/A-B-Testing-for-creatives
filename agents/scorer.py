@@ -1,55 +1,88 @@
 """
-AGENT 1 — Pre-Launch Scoring Agent
-===================================
-Responsibilities:
-  1. Quality Filter    — remove blurry, overexposed, or low-res images
-  2. Variation Generator — produce 8 variations per image (crop, color, text overlay)
-  3. Geo-aware Prompt Builder — call Groq to get state-level scoring criteria
-  4. OpenCLIP Scorer  — embed all variations + prompts, compute similarity scores
-  5. Return ranked results ready for Agent 2
+AGENT 1 — Creative Scorer (v2)
+================================
+Scores N raw uploaded images directly using OpenCLIP + Groq.
+Supports JPG, JPEG, PNG, WebP, AVIF, BMP, TIFF — up to 60 images.
+
+Pipeline:
+  1. Quality Filter     — blur / brightness / resolution gate
+  2. Platform Prompt Builder — Groq generates platform-specific scoring criteria
+  3. OpenCLIP Scorer    — batched image + copy embeddings, combined score
+  4. Rank + top-K slice — sorted by combined_score, ready for bandit.py
 """
 
-import os
-import io
-import math
 import textwrap
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from PIL import Image, UnidentifiedImageError
 import open_clip
 import torch
 from groq import Groq
 
 
 # ─────────────────────────────────────────────
-#  Constants
+#  Platform visual norms
 # ─────────────────────────────────────────────
 
 PLATFORMS = ["Meta Feed", "Meta Reels", "Amazon", "Google Display"]
 
-INDIAN_STATES = [
-    "Maharashtra", "Delhi", "Karnataka", "Tamil Nadu", "Telangana",
-    "Gujarat", "Rajasthan", "Punjab", "West Bengal", "Uttar Pradesh",
-    "Kerala", "Haryana", "Madhya Pradesh", "Bihar", "Odisha",
-]
-
-CROP_RATIOS = {
-    "1:1 Square":    (1080, 1080),
-    "9:16 Vertical": (1080, 1920),
-    "4:5 Portrait":  (1080, 1350),
+PLATFORM_NORMS = {
+    "Meta Feed": (
+        "thumb-stopping lifestyle image, emotional human connection, faces or aspirational "
+        "scenes, warm or natural tones, person-product interaction"
+    ),
+    "Meta Reels": (
+        "dynamic frame suggesting motion or energy, bold visual contrast, minimal clutter, "
+        "designed to stop a fast scroll, subject fills the frame vertically"
+    ),
+    "Amazon": (
+        "clean white or neutral background, product as hero, clinical sharpness, "
+        "no distracting props, studio-quality lighting"
+    ),
+    "Google Display": (
+        "bold high-contrast composition, single clear focal point, works at small sizes "
+        "like 300x250, strong colour differentiation, minimal text area in image"
+    ),
 }
-
-COLOR_GRADES = ["warm", "cool", "high_contrast"]
 
 QUALITY_THRESHOLDS = {
     "min_width":      600,
     "min_height":     600,
-    "max_blur":       120,   # Laplacian variance — below this = blurry
-    "min_brightness": 40,    # 0-255 mean pixel value
+    "max_blur":       120,
+    "min_brightness": 40,
     "max_brightness": 220,
 }
+
+IMAGE_WEIGHT = 0.6
+COPY_WEIGHT  = 0.4
+MAX_CREATIVES = 60
+
+
+# ─────────────────────────────────────────────
+#  Image loading — PIL first, then numpy/cv2
+#  Fixes: WebP, AVIF, progressive JPEGs that
+#  cv2.imread() silently fails on
+# ─────────────────────────────────────────────
+
+def _load_image_pil(path: str) -> Image.Image | None:
+    """
+    Load any image format PIL supports.
+    Returns RGB PIL image or None if unreadable.
+    """
+    try:
+        img = Image.open(path)
+        img.load()                    # force decode now, catch corrupt files early
+        return img.convert("RGB")
+    except (UnidentifiedImageError, Exception):
+        return None
+
+
+def _pil_to_cv2_gray(pil_img: Image.Image) -> np.ndarray:
+    """Convert PIL RGB image to OpenCV grayscale numpy array."""
+    arr = np.array(pil_img)
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
 
 # ─────────────────────────────────────────────
@@ -57,205 +90,110 @@ QUALITY_THRESHOLDS = {
 # ─────────────────────────────────────────────
 
 def check_image_quality(img_path: str) -> dict:
-    img_cv = cv2.imread(img_path)
-    if img_cv is None:
-        return {"passed": False, "reasons": ["Could not read image"], "metrics": {}}
+    """
+    Quality gate using PIL for loading (format-agnostic)
+    and numpy/cv2 for metrics.
+    """
+    pil_img = _load_image_pil(img_path)
+    if pil_img is None:
+        return {
+            "passed":  False,
+            "reasons": ["Could not read image — unsupported or corrupt file"],
+            "metrics": {},
+            "pil_image": None,
+        }
 
-    h, w = img_cv.shape[:2]
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    w, h   = pil_img.size
+    gray   = _pil_to_cv2_gray(pil_img)
     blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
     brightness = float(np.mean(gray))
 
     reasons = []
     if w < QUALITY_THRESHOLDS["min_width"]:
-        reasons.append(f"Width too small ({w}px < {QUALITY_THRESHOLDS['min_width']}px)")
+        reasons.append(f"Width too small ({w}px)")
     if h < QUALITY_THRESHOLDS["min_height"]:
-        reasons.append(f"Height too small ({h}px < {QUALITY_THRESHOLDS['min_height']}px)")
+        reasons.append(f"Height too small ({h}px)")
     if blur_score < QUALITY_THRESHOLDS["max_blur"]:
-        reasons.append(f"Image too blurry (score: {blur_score:.1f})")
+        reasons.append(f"Too blurry (score: {blur_score:.1f})")
     if brightness < QUALITY_THRESHOLDS["min_brightness"]:
-        reasons.append(f"Image too dark (brightness: {brightness:.1f})")
+        reasons.append(f"Too dark (brightness: {brightness:.1f})")
     if brightness > QUALITY_THRESHOLDS["max_brightness"]:
-        reasons.append(f"Image overexposed (brightness: {brightness:.1f})")
+        reasons.append(f"Overexposed (brightness: {brightness:.1f})")
 
     return {
-        "passed": len(reasons) == 0,
-        "reasons": reasons,
-        "metrics": {
-            "width": w, "height": h,
+        "passed":    len(reasons) == 0,
+        "reasons":   reasons,
+        "metrics":   {
+            "width":      w,
+            "height":     h,
             "blur_score": round(blur_score, 1),
             "brightness": round(brightness, 1),
         },
+        "pil_image": pil_img if len(reasons) == 0 else None,
     }
 
 
-def filter_images(image_paths: list) -> tuple:
-    passed, report = [], []
-    for path in image_paths:
-        result = check_image_quality(path)
-        result["path"] = path
-        result["filename"] = Path(path).name
-        report.append(result)
-        if result["passed"]:
-            passed.append(path)
-    return passed, report
-
-
 # ─────────────────────────────────────────────
-#  2. Variation Generator
+#  2. Platform Prompt Builder (Groq)
 # ─────────────────────────────────────────────
 
-def _smart_crop(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    src_w, src_h = img.size
-    src_ratio = src_w / src_h
-    tgt_ratio = target_w / target_h
-    if src_ratio > tgt_ratio:
-        new_w = int(src_h * tgt_ratio)
-        left = (src_w - new_w) // 2
-        img = img.crop((left, 0, left + new_w, src_h))
-    else:
-        new_h = int(src_w / tgt_ratio)
-        top = (src_h - new_h) // 2
-        img = img.crop((0, top, src_w, top + new_h))
-    return img.resize((target_w, target_h), Image.LANCZOS)
+def build_platform_prompts(
+    groq_client:      Groq,
+    platform:         str,
+    product_category: str,
+    audience_desc:    str,
+) -> list:
+    norm = PLATFORM_NORMS.get(platform, PLATFORM_NORMS["Meta Feed"])
 
-
-def _apply_color_grade(img: Image.Image, grade: str) -> Image.Image:
-    if grade == "warm":
-        r, g, b = img.split()
-        r = ImageEnhance.Brightness(r).enhance(1.12)
-        b = ImageEnhance.Brightness(b).enhance(0.88)
-        img = Image.merge("RGB", (r, g, b))
-        img = ImageEnhance.Color(img).enhance(1.2)
-    elif grade == "cool":
-        r, g, b = img.split()
-        r = ImageEnhance.Brightness(r).enhance(0.88)
-        b = ImageEnhance.Brightness(b).enhance(1.12)
-        img = Image.merge("RGB", (r, g, b))
-        img = ImageEnhance.Color(img).enhance(0.9)
-    elif grade == "high_contrast":
-        img = ImageEnhance.Contrast(img).enhance(1.5)
-        img = ImageEnhance.Sharpness(img).enhance(1.3)
-    return img
-
-
-def _add_text_overlay(img: Image.Image, text: str = "NEW ARRIVAL") -> Image.Image:
-    img = img.copy()
-    w, h = img.size
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    bar = ImageDraw.Draw(overlay)
-    bar.rectangle([(0, h - 80), (w, h)], fill=(0, 0, 0, 140))
-    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(img)
-    font_size = max(24, w // 22)
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-    except Exception:
-        font = ImageFont.load_default()
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    draw.text(((w - text_w) / 2, h - 58), text, fill="white", font=font)
-    return img
-
-
-def generate_variations(img_path: str, overlay_text: str = "NEW ARRIVAL") -> list:
-    base = Image.open(img_path).convert("RGB")
-    filename = Path(img_path).stem
-    variations = []
-
-    # 3 crop ratios
-    for ratio_name, (tw, th) in CROP_RATIOS.items():
-        cropped = _smart_crop(base, tw, th)
-        variations.append({
-            "variation_id": f"{filename}_{ratio_name.replace(':','x').replace(' ','')}",
-            "label": ratio_name,
-            "type": "crop",
-            "image": cropped,
-        })
-
-    # 3 color grades on 1:1 base
-    base_sq = _smart_crop(base, 1080, 1080)
-    for grade in COLOR_GRADES:
-        variations.append({
-            "variation_id": f"{filename}_{grade}",
-            "label": f"Color: {grade.replace('_',' ').title()}",
-            "type": "color",
-            "image": _apply_color_grade(base_sq.copy(), grade),
-        })
-
-    # 1 text overlay
-    variations.append({
-        "variation_id": f"{filename}_text_overlay",
-        "label": "Text Overlay",
-        "type": "text",
-        "image": _add_text_overlay(base_sq.copy(), overlay_text),
-    })
-
-    # 1 sharpened
-    variations.append({
-        "variation_id": f"{filename}_sharpened",
-        "label": "Sharpened",
-        "type": "color",
-        "image": ImageEnhance.Sharpness(base_sq.copy()).enhance(2.0),
-    })
-
-    return variations  # 8 total
-
-
-# ─────────────────────────────────────────────
-#  3. Geo-Aware Prompt Builder (Groq)
-# ─────────────────────────────────────────────
-
-def build_geo_aware_prompts(groq_client, platform, state, product_category, audience_desc) -> list:
     system_msg = textwrap.dedent("""
-        You are an expert performance marketing creative strategist specialising
-        in Indian digital advertising. You deeply understand how visual preferences
-        differ across Indian states — colours, aesthetics, aspirational cues, and
-        cultural symbolism.
+        You are a performance creative strategist who predicts which ad images
+        will perform best on specific platforms.
 
-        Return EXACTLY 3 short descriptive prompts (one per line, no numbering or bullets)
-        describing what a HIGH-PERFORMING product ad image looks like for the given context.
-        Each prompt should be 1-2 sentences focusing on visual qualities: lighting, colour
-        palette, composition, subject framing, emotional tone. Do not mention brand names.
+        Return EXACTLY 3 short scoring prompts — one per line, no numbering or bullets.
+        Each prompt is 1-2 sentences describing what a HIGH-PERFORMING ad image looks like
+        for this exact context. Focus ONLY on:
+        - Visual style that fits the platform algorithm
+        - Lighting, composition, and colour that resonate with the audience
+        - How the product should be presented for maximum impact
+        Do NOT mention geography. Do NOT mention brand names.
     """).strip()
 
     user_msg = (
         f"Platform: {platform}\n"
-        f"Target State: {state}, India\n"
+        f"Platform visual norms: {norm}\n"
         f"Product Category: {product_category}\n"
         f"Audience: {audience_desc}\n\n"
-        "Give me 3 visual scoring prompts describing what a winning ad image looks like."
+        "Write 3 visual scoring prompts describing what a winning ad image looks like."
     )
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user",   "content": user_msg},
-        ],
-        temperature=0.7,
-        max_tokens=300,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    prompts = [line.strip() for line in raw.split("\n") if line.strip()][:3]
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user",   "content": user_msg},
+            ],
+            temperature=0.5,
+            max_tokens=300,
+        )
+        raw     = response.choices[0].message.content.strip()
+        prompts = [line.strip() for line in raw.split("\n") if line.strip()][:3]
+    except Exception:
+        prompts = []
 
     while len(prompts) < 3:
         prompts.append(
-            f"A professional, high-quality product advertisement image for {product_category} "
-            f"targeting {state} audience on {platform} with strong visual appeal."
+            f"A professional, well-lit {product_category} advertisement optimised for "
+            f"{platform} with strong visual clarity and platform-appropriate composition."
         )
     return prompts
 
 
 # ─────────────────────────────────────────────
-#  4. OpenCLIP Scorer
+#  3. OpenCLIP Scorer (batched)
 # ─────────────────────────────────────────────
 
-_clip_model = None
-_clip_preprocess = None
-_clip_tokenizer = None
-_clip_device = None
+_clip_model = _clip_preprocess = _clip_tokenizer = _clip_device = None
 
 
 def _load_clip():
@@ -286,85 +224,146 @@ def _embed_texts(texts: list) -> torch.Tensor:
     return feats / feats.norm(dim=-1, keepdim=True)
 
 
-def score_variations(variations: list, scoring_prompts: list) -> list:
-    images = [v["image"] for v in variations]
+def _build_copy_text(creative: dict) -> str:
+    parts = [
+        creative.get("headline", ""),
+        creative.get("primary_text", ""),
+        creative.get("cta", ""),
+    ]
+    return " | ".join(p for p in parts if p.strip())
+
+
+def score_creatives(creatives: list, scoring_prompts: list) -> list:
+    images     = [c["image"] for c in creatives]
+    copy_texts = [_build_copy_text(c) for c in creatives]
+
     img_embeds = _embed_images(images)
     txt_embeds = _embed_texts(scoring_prompts)
-    sim_matrix = (img_embeds @ txt_embeds.T).cpu().numpy()
+    img_sim    = (img_embeds @ txt_embeds.T).cpu().numpy()
 
-    for i, var in enumerate(variations):
-        var["prompt_scores"] = {
-            prompt[:60]: float(sim_matrix[i, j])
-            for j, prompt in enumerate(scoring_prompts)
+    copy_sims       = np.zeros(len(creatives), dtype=float)
+    non_empty_idx   = [i for i, t in enumerate(copy_texts) if t.strip()]
+    non_empty_texts = [copy_texts[i] for i in non_empty_idx]
+
+    if non_empty_texts:
+        copy_embeds = _embed_texts(non_empty_texts)
+        sims        = (copy_embeds @ txt_embeds.T).cpu().numpy()
+        for j, orig_i in enumerate(non_empty_idx):
+            copy_sims[orig_i] = float(sims[j].mean())
+
+    for i, creative in enumerate(creatives):
+        img_score  = float(img_sim[i].mean())
+        copy_score = float(copy_sims[i])
+        has_copy   = bool(copy_texts[i].strip())
+        combined   = (IMAGE_WEIGHT * img_score + COPY_WEIGHT * copy_score) if has_copy else img_score
+
+        creative["image_score"]   = round(img_score,  4)
+        creative["copy_score"]    = round(copy_score, 4)
+        creative["score"]         = round(combined,   4)
+        creative["prompt_scores"] = {
+            p[:60]: round(float(img_sim[i, j]), 4)
+            for j, p in enumerate(scoring_prompts)
         }
-        var["score"] = float(sim_matrix[i].mean())
 
-    return sorted(variations, key=lambda x: x["score"], reverse=True)
+    return sorted(creatives, key=lambda x: x["score"], reverse=True)
 
 
 # ─────────────────────────────────────────────
-#  5. Main Entry Point
+#  4. Main Entry Point
 # ─────────────────────────────────────────────
 
 def run_agent1(
-    image_paths: list,
-    platform: str,
-    state: str,
+    creatives_input:  list,
+    platform:         str,
     product_category: str,
-    audience_desc: str,
-    groq_api_key: str,
-    overlay_text: str = "NEW ARRIVAL",
-    progress_callback=None,
+    audience_desc:    str,
+    groq_api_key:     str,
+    top_k:            int = 5,
+    progress_callback = None,
 ) -> dict:
     """
-    Full Agent 1 pipeline. Returns scored results dict ready for Agent 2.
+    Full Agent 1 pipeline (v2).
+
+    creatives_input: list of dicts:
+      { path, label, headline, primary_text, cta }
+
+    Supports up to MAX_CREATIVES (60) images.
+    Accepts any format PIL can open: JPG, JPEG, PNG, WebP, AVIF, BMP, TIFF.
     """
-    def _progress(msg):
+    def _p(msg):
         if progress_callback:
             progress_callback(msg)
 
+    # Cap at 60
+    if len(creatives_input) > MAX_CREATIVES:
+        creatives_input = creatives_input[:MAX_CREATIVES]
+        _p(f"⚠️  Capped at {MAX_CREATIVES} creatives.")
+
+    if len(creatives_input) < 2:
+        return {"error": "Upload at least 2 creatives for A/B testing."}
+
     groq_client = Groq(api_key=groq_api_key)
 
-    _progress("🔍 Running quality filter...")
-    passed_paths, quality_report = filter_images(image_paths)
+    # ── Step 1: Quality filter ────────────────────────────────────────
+    total   = len(creatives_input)
+    passed  = []
+    q_report = []
 
-    if not passed_paths:
-        return {"error": "No images passed quality filter.", "quality_report": quality_report}
+    for i, c in enumerate(creatives_input):
+        _p(f"🔍 Quality checking {i+1}/{total}: {Path(c['path']).name}")
+        result             = check_image_quality(c["path"])
+        result["path"]     = c["path"]
+        result["filename"] = Path(c["path"]).name
+        result["label"]    = c.get("label", f"Creative {chr(65 + i)}")
+        q_report.append(result)
 
-    _progress(f"🌍 Building geo-aware prompts for {state} × {platform}...")
-    scoring_prompts = build_geo_aware_prompts(
-        groq_client, platform, state, product_category, audience_desc
+        if result["passed"]:
+            passed.append({
+                "creative_id":  f"creative_{chr(65 + i)}",
+                "label":        c.get("label", f"Creative {chr(65 + i)}"),
+                "filename":     Path(c["path"]).name,
+                "path":         c["path"],
+                "image":        result["pil_image"],   # already loaded — no double read
+                "headline":     c.get("headline", ""),
+                "primary_text": c.get("primary_text", ""),
+                "cta":          c.get("cta", ""),
+            })
+        else:
+            _p(f"⚠️  {Path(c['path']).name} failed: {', '.join(result['reasons'])}")
+
+    _p(f"✅ {len(passed)}/{total} creatives passed quality filter")
+
+    if len(passed) < 2:
+        return {
+            "error":          "At least 2 creatives must pass quality check.",
+            "quality_report": q_report,
+        }
+
+    # ── Step 2: Platform prompts ──────────────────────────────────────
+    _p(f"🎯 Building scoring criteria for {platform}...")
+    scoring_prompts = build_platform_prompts(
+        groq_client, platform, product_category, audience_desc
     )
 
-    all_results = []
-    all_variations_flat = []
+    # ── Step 3: Score (batched) ───────────────────────────────────────
+    _p(f"🤖 Scoring {len(passed)} creatives via OpenCLIP...")
+    scored = score_creatives(passed, scoring_prompts)
 
-    for idx, img_path in enumerate(passed_paths):
-        _progress(f"🎨 Generating variations {idx+1}/{len(passed_paths)}: {Path(img_path).name}")
-        variations = generate_variations(img_path, overlay_text)
+    for i, c in enumerate(scored):
+        c["rank"] = i + 1
 
-        _progress(f"📊 Scoring variations for {Path(img_path).name}...")
-        scored = score_variations(variations, scoring_prompts)
+    top_k_creatives = scored[:max(top_k, 2)]
 
-        all_results.append({
-            "source_image":    img_path,
-            "source_filename": Path(img_path).name,
-            "variations":      scored,
-            "best_variation":  scored[0],
-        })
-        all_variations_flat.extend(scored)
-
-    top_variation = max(all_variations_flat, key=lambda x: x["score"])
-
-    _progress("✅ Agent 1 complete.")
+    _p(f"✅ Agent 1 done — {len(scored)} ranked, top {len(top_k_creatives)} forwarded.")
 
     return {
-        "quality_report":    quality_report,
-        "passed_images":     passed_paths,
-        "scoring_prompts":   scoring_prompts,
-        "results":           all_results,
-        "top_variation":     top_variation,
-        "platform":          platform,
-        "state":             state,
-        "product_category":  product_category,
+        "quality_report":   q_report,
+        "passed_count":     len(passed),
+        "total_count":      total,
+        "scoring_prompts":  scoring_prompts,
+        "all_creatives":    scored,
+        "top_k_creatives":  top_k_creatives,
+        "platform":         platform,
+        "product_category": product_category,
+        "audience_desc":    audience_desc,
     }
