@@ -326,7 +326,7 @@ def page_upload():
             passed_area.markdown(f"""
             <div class="progress-row">
                 <span class="progress-label">Images passed quality filter</span>
-                <span class="progress-count">{a1['passed_count']} / {a1['total_count']}</span>
+                <span class="progress-count">{a1.get('passed_count', len(a1.get('top_k_creatives', [])) )} / {a1.get('total_count', len(a1.get('all_creatives', [])))}</span>
             </div>""", unsafe_allow_html=True)
 
             progress_bar.progress(45, text="Bandit Agent: Allocating simulation budget...")
@@ -358,7 +358,7 @@ def page_upload():
             st.session_state.agent3_out = a3
 
             progress_bar.progress(100, text="Done!")
-            st.success(f"✅ Analysis complete — {a1['passed_count']} creatives scored!")
+            st.success(f"✅ Analysis complete — {a1.get('passed_count', len(a1.get('all_creatives', [])))} creatives scored!")
             st.session_state.current_page = "results"
             st.rerun()
 
