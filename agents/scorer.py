@@ -126,13 +126,13 @@ def _apply_color_grade(img: Image.Image, grade: str) -> Image.Image:
         r = ImageEnhance.Brightness(r).enhance(1.12)
         b = ImageEnhance.Brightness(b).enhance(0.88)
         img = Image.merge("RGB", (r, g, b))
-        img = ImageEnhance.Saturation(img).enhance(1.2)
+        img = ImageEnhance.Color(img).enhance(1.2)
     elif grade == "cool":
         r, g, b = img.split()
         r = ImageEnhance.Brightness(r).enhance(0.88)
         b = ImageEnhance.Brightness(b).enhance(1.12)
         img = Image.merge("RGB", (r, g, b))
-        img = ImageEnhance.Saturation(img).enhance(0.9)
+        img = ImageEnhance.Color(img).enhance(0.9)
     elif grade == "high_contrast":
         img = ImageEnhance.Contrast(img).enhance(1.5)
         img = ImageEnhance.Sharpness(img).enhance(1.3)
