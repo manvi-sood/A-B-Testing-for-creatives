@@ -24,9 +24,12 @@ from agents.simulator import run_agent2
 from agents.brief     import run_agent3
 
 # ─────────────────────────────────────────────
-#  Auto-load Groq key from environment
+#  Load Groq key — Streamlit secrets (prod) or env (local/Colab)
 # ─────────────────────────────────────────────
-_ENV_GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+try:
+    _ENV_GROQ_KEY = st.secrets["GROQ_API_KEY"]
+except Exception:
+    _ENV_GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # ─────────────────────────────────────────────
 #  Page config
@@ -290,24 +293,11 @@ def page_upload():
     col_l, col_r = st.columns([1.1, 0.9], gap="large")
 
     with col_l:
-        # Step 1 — API Key
-        st.markdown('<span class="section-label">Step 1 — Groq API Key</span>', unsafe_allow_html=True)
-        groq_key = st.text_input(
-            "Groq API Key",
-            type="password",
-            value=_ENV_GROQ_KEY,          # ← auto-fills from os.environ
-            placeholder="gsk_...",
-            label_visibility="collapsed",
-            help="Get a free key at console.groq.com"
-        )
-        if groq_key:
-            st.success("✅ API key loaded")
-        else:
-            st.markdown('<div class="tip-box">⚠️ Add your Groq key above. Get one free at console.groq.com</div>',
-                        unsafe_allow_html=True)
+        # API key loaded silently from secrets — not shown in UI
+        groq_key = _ENV_GROQ_KEY
 
-        # Step 2 — Upload
-        st.markdown('<span class="section-label">Step 2 — Upload Images</span>', unsafe_allow_html=True)
+        # Step 1 — Upload
+        st.markdown('<span class="section-label">Step 1 — Upload Images</span>', unsafe_allow_html=True)
         uploaded = st.file_uploader(
             "Upload images",
             type=["jpg","jpeg","png","webp","zip"],
@@ -317,8 +307,8 @@ def page_upload():
         if uploaded:
             st.success(f"✅ {len(uploaded)} file(s) ready")
 
-        # Step 3 — Campaign config
-        st.markdown('<span class="section-label">Step 3 — Campaign Setup</span>', unsafe_allow_html=True)
+        # Step 2 — Campaign config
+        st.markdown('<span class="section-label">Step 2 — Campaign Setup</span>', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1: platform = st.selectbox("Platform", PLATFORMS)
         with c2: state    = st.selectbox("Target State", INDIAN_STATES)
@@ -367,9 +357,9 @@ def page_upload():
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-    run_ready = bool(groq_key and uploaded and product_category and audience_desc)
+    run_ready = bool(uploaded and product_category and audience_desc)
     if not run_ready:
-        st.markdown('<div class="tip-box">⚡ Complete all fields above to run the analysis.</div>',
+        st.markdown('<div class="tip-box">⚡ Upload images and fill in campaign details to run the analysis.</div>',
                     unsafe_allow_html=True)
 
     if st.button("🚀  Run Creative A/B Analysis", type="primary",
