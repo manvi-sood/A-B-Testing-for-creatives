@@ -2,7 +2,7 @@
 Creative A/B Testing Agent v2 — Streamlit Frontend
 ====================================================
 Page 1: Upload & Configure
-Page 2: Leaderboard Results  (new — top-5 with bandit allocation bars)
+Page 2: Leaderboard Results
 Page 3: Creative Report + PDF
 """
 
@@ -23,18 +23,18 @@ from agents.simulator import run_simulator
 from agents.brief     import run_agent3
 
 # ─────────────────────────────────────────────
-#  Groq key
+#  Groq key — backend only, never shown in UI
 # ─────────────────────────────────────────────
 try:
-    _ENV_GROQ_KEY = st.secrets["GROQ_API_KEY"]
+    _GROQ_KEY = st.secrets["GROQ_API_KEY"]
 except Exception:
-    _ENV_GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+    _GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # ─────────────────────────────────────────────
 #  Page config
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Creative A/B Agent v2",
+    page_title="Creative A/B Agent",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -87,15 +87,24 @@ section[data-testid="stSidebar"] .stButton button:hover {
               font-size: 0.68rem; font-weight: 700; letter-spacing: 1px;
               text-transform: uppercase; padding: 3px 10px; border-radius: 4px; margin-bottom: 8px; }
 
+.upload-count { background: #1a1a2e; color: #e94560; border-radius: 10px;
+                padding: 18px 24px; text-align: center; margin-bottom: 16px; }
+.upload-count .big { font-family: 'Syne', sans-serif; font-size: 2.8rem;
+                     font-weight: 800; line-height: 1; }
+.upload-count .sub { font-size: 0.8rem; opacity: 0.6; margin-top: 4px; }
+
+.progress-row { display: flex; align-items: center; gap: 12px;
+                background: white; border-radius: 10px; padding: 12px 16px;
+                margin-bottom: 8px; border: 1px solid #e2e2dc; }
+.progress-label { font-size: 0.85rem; color: #333; flex: 1; }
+.progress-count { font-family: 'Syne', sans-serif; font-weight: 700;
+                  color: #e94560; font-size: 1rem; }
+
 .bar-wrap { background: #e2e2dc; border-radius: 4px; height: 5px; margin-top: 5px; }
 .bar-fill { background: linear-gradient(90deg,#e94560,#0f3460); border-radius: 4px; height: 5px; }
-.bandit-bar-wrap { background: #e2e2dc; border-radius: 4px; height: 8px; margin-top: 3px; }
-.bandit-bar-fill { background: linear-gradient(90deg,#9b59b6,#3498db); border-radius: 4px; height: 8px; }
 
 .chip { display: inline-block; background: #eef2ff; color: #3730a3;
         border-radius: 20px; padding: 5px 13px; font-size: 0.78rem; margin: 3px; }
-.bandit-chip { display: inline-block; background: #f3e8ff; color: #7c3aed;
-               border-radius: 20px; padding: 5px 13px; font-size: 0.78rem; margin: 3px; }
 
 .tip-box  { background: #fff8e7; border-left: 3px solid #f0a500; border-radius: 0 8px 8px 0;
             padding: 11px 15px; font-size: 0.83rem; color: #7a5c00; margin: 10px 0; }
@@ -118,7 +127,8 @@ div[data-testid="stProgress"] > div > div {
     font-size: 1rem !important; padding: 14px !important; }
 div[data-testid="stTextInput"] input,
 div[data-testid="stTextArea"] textarea {
-    background: white !important; border-radius: 8px !important; border-color: #e2e2dc !important; }
+    background: white !important; border-radius: 8px !important;
+    border-color: #e2e2dc !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -126,7 +136,7 @@ div[data-testid="stTextArea"] textarea {
 # ─────────────────────────────────────────────
 #  Session state
 # ─────────────────────────────────────────────
-for key in ["agent1_out", "bandit_out", "sim_out", "agent3_out", "current_page"]:
+for key in ["agent1_out","bandit_out","sim_out","agent3_out","current_page"]:
     if key not in st.session_state:
         st.session_state[key] = None if key != "current_page" else "upload"
 
@@ -135,12 +145,12 @@ for key in ["agent1_out", "bandit_out", "sim_out", "agent3_out", "current_page"]
 #  Sidebar
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🎯 Creative A/B Agent v2")
+    st.markdown("### 🎯 Creative A/B Agent")
     st.markdown("---")
     pages = {
-        "upload":    "📤  Upload & Configure",
-        "results":   "📊  Leaderboard Results",
-        "report":    "📋  Creative Report",
+        "upload":  "📤  Upload & Configure",
+        "results": "📊  Results",
+        "report":  "📋  Creative Report",
     }
     for key, label in pages.items():
         active = st.session_state.current_page == key
@@ -148,16 +158,6 @@ with st.sidebar:
                      type="primary" if active else "secondary"):
             st.session_state.current_page = key
             st.rerun()
-
-    st.markdown("---")
-    st.markdown("**v2 What's New**")
-    st.markdown("""
-- 🎰 Thompson Sampling budget allocator
-- 🏆 Full leaderboard (not just top-2)
-- 📈 vs-field confidence for every creative
-- ✂️ No geo — platform visual norms only
-- 🖼️ Score raw images, no variation generation
-""")
 
 
 # ─────────────────────────────────────────────
@@ -167,15 +167,10 @@ def _score_bar(score: float, max_score: float = 0.35) -> str:
     pct = min(int((score / max_score) * 100), 100)
     return f'<div class="bar-wrap"><div class="bar-fill" style="width:{pct}%"></div></div>'
 
-def _bandit_bar(n_sims: int, max_sims: int) -> str:
-    pct = min(int((n_sims / max(max_sims, 1)) * 100), 100)
-    return f'<div class="bandit-bar-wrap"><div class="bandit-bar-fill" style="width:{pct}%"></div></div>'
-
-def _plot_leaderboard_chart(leaderboard: list, metric: str, title: str):
+def _plot_chart(leaderboard: list, metric: str, title: str):
     labels = [v["label"][:18] for v in leaderboard]
     values = [v[metric] for v in leaderboard]
     clrs   = ["#e94560" if i == 0 else "#0f3460" for i in range(len(values))]
-
     fig, ax = plt.subplots(figsize=(6, 3.5))
     bars    = ax.barh(labels[::-1], values[::-1], color=clrs[::-1], height=0.55)
     ax.set_xlabel(title, fontsize=9, color="#666")
@@ -190,36 +185,6 @@ def _plot_leaderboard_chart(leaderboard: list, metric: str, title: str):
     plt.tight_layout()
     return fig
 
-def _plot_bandit_allocation(allocations: list):
-    labels  = [a["label"][:18] for a in allocations]
-    sims    = [a["n_simulations"] for a in allocations]
-    alphas  = [a["alpha"] for a in allocations]
-    clrs    = ["#9b59b6" if i == 0 else "#3498db" for i in range(len(sims))]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 3.5))
-
-    # Simulation budget
-    ax1.barh(labels[::-1], sims[::-1], color=clrs[::-1], height=0.55)
-    ax1.set_title("Bandit Budget Allocation", fontsize=9, color="#333")
-    ax1.set_xlabel("Monte Carlo Runs", fontsize=8, color="#666")
-    ax1.tick_params(labelsize=8)
-    ax1.spines["top"].set_visible(False)
-    ax1.spines["right"].set_visible(False)
-
-    # Beta alpha (posterior strength)
-    ax2.barh(labels[::-1], alphas[::-1], color="#e94560", height=0.55, alpha=0.75)
-    ax2.set_title("Beta Prior Strength (alpha)", fontsize=9, color="#333")
-    ax2.set_xlabel("Alpha value", fontsize=8, color="#666")
-    ax2.tick_params(labelsize=8)
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["right"].set_visible(False)
-
-    for ax in [ax1, ax2]:
-        ax.set_facecolor("#f4f4f0")
-    fig.patch.set_facecolor("#f4f4f0")
-    plt.tight_layout()
-    return fig
-
 
 # ═══════════════════════════════════════════════════════════
 #  PAGE 1 — Upload & Configure
@@ -227,50 +192,55 @@ def _plot_bandit_allocation(allocations: list):
 def page_upload():
     st.markdown("""
     <div class="hero-wrap">
-        <p class="hero-title">Creative <span class="hero-accent">A/B Agent</span> v2</p>
+        <p class="hero-title">Creative <span class="hero-accent">A/B Agent</span></p>
         <p class="hero-sub">Score your ad creatives before spending a single rupee.</p>
     </div>""", unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="info-box">
-    <b>How v2 works:</b><br>
-    1. Upload N creatives (raw images — no variations generated)<br>
-    2. Agent 1 scores each via OpenCLIP + platform visual norms<br>
-    3. Bandit Agent uses Thompson Sampling to allocate simulation budget<br>
-    4. Monte Carlo runs across all creatives weighted by bandit allocation<br>
-    5. Full leaderboard + statistical confidence + creative brief
-    </div>""", unsafe_allow_html=True)
+    # No Groq key — exit early with clear message
+    if not _GROQ_KEY:
+        st.error("⚠️ GROQ_API_KEY not found. Add it to Streamlit secrets and redeploy.")
+        st.stop()
 
     col_l, col_r = st.columns([1.4, 1], gap="large")
 
     with col_l:
         st.markdown('<span class="section-label">Upload Creatives</span>',
                     unsafe_allow_html=True)
+        st.caption("Supports JPG, JPEG, PNG, WebP · Up to 60 images")
+
         uploaded = st.file_uploader(
-            "Upload 2–10 images (JPG, WebP, PNG)",
-            type=["jpg","jpeg","png","webp"],
+            "Drop images here",
+            type=["jpg", "jpeg", "png", "webp"],
             accept_multiple_files=True,
+            label_visibility="collapsed",
         )
 
+        # ── Upload count block (no previews) ─────────────────────────
         if uploaded:
-            cols_per_row = 4
-            for row in [uploaded[i:i+cols_per_row]
-                        for i in range(0, len(uploaded), cols_per_row)]:
-                row_cols = st.columns(len(row))
-                for col, f in zip(row_cols, row):
-                    with col:
-                        st.image(Image.open(f), use_container_width=True)
-                        st.caption(f.name[:20])
+            n = len(uploaded)
+            st.markdown(f"""
+            <div class="upload-count">
+                <div class="big">{n}</div>
+                <div class="sub">image{"s" if n != 1 else ""} selected · max 60</div>
+            </div>""", unsafe_allow_html=True)
+
+            if n > 60:
+                st.warning("Only the first 60 images will be processed.")
+
+            # List filenames with index — no image rendering
+            with st.expander(f"View file list ({n} files)"):
+                for i, f in enumerate(uploaded[:60]):
+                    st.caption(f"{i+1}. {f.name}")
 
         st.markdown('<span class="section-label">Ad Copy (Optional)</span>',
                     unsafe_allow_html=True)
-        headline     = st.text_input("Headline",     placeholder="e.g. Built for every road")
-        primary_text = st.text_area("Primary Text",  placeholder="Short body copy...", height=80)
-        cta          = st.text_input("CTA",           placeholder="e.g. Shop Now")
+        headline     = st.text_input("Headline",    placeholder="e.g. Built for every road")
+        primary_text = st.text_area("Primary Text", placeholder="Short body copy...", height=80)
+        cta          = st.text_input("CTA",         placeholder="e.g. Shop Now")
 
         st.markdown(
-            '<div class="tip-box">💡 Same copy is used to score all creatives '
-            '— the system measures which image best matches your copy\'s intent.</div>',
+            '<div class="tip-box">💡 Same copy applied to all creatives — '
+            'scoring measures which image best matches your copy intent.</div>',
             unsafe_allow_html=True
         )
 
@@ -278,39 +248,29 @@ def page_upload():
         st.markdown('<span class="section-label">Campaign Settings</span>',
                     unsafe_allow_html=True)
         platform         = st.selectbox("Target Platform", PLATFORMS)
-        product_category = st.text_input("Product Category", placeholder="e.g. Luggage, Skincare")
+        product_category = st.text_input("Product Category",
+                                         placeholder="e.g. Luggage, Skincare")
         audience_desc    = st.text_input("Audience Description",
                                          placeholder="e.g. Urban professionals 25-35")
-        top_k            = st.slider("Top-K creatives to simulate", 2, 8, 5)
-        budget_per       = st.number_input("Budget per creative (Rs.)", 100, 5000, 500, step=100)
-
-        st.markdown('<span class="section-label">API Key</span>', unsafe_allow_html=True)
-        groq_key = _ENV_GROQ_KEY
-        if not groq_key:
-            groq_key = st.text_input("Groq API Key", type="password",
-                                     placeholder="gsk_...")
-        else:
-            st.success("✅ Groq API key loaded from secrets")
+        top_k            = st.slider("Top-K creatives to simulate", 2, 10, 5)
+        budget_per       = st.number_input("Budget per creative (Rs.)",
+                                           100, 5000, 500, step=100)
 
         st.markdown("<br>", unsafe_allow_html=True)
         run_btn = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
 
+    # ── Run ───────────────────────────────────────────────────────────
     if run_btn:
-        # Validate
         if not uploaded or len(uploaded) < 2:
             st.error("Upload at least 2 images.")
             return
         if not product_category.strip():
             st.error("Enter a product category.")
             return
-        if not groq_key:
-            st.error("Groq API key required.")
-            return
 
-        # Save uploads to temp files
         tmp_dir = tempfile.mkdtemp()
         creatives_input = []
-        for f in uploaded:
+        for f in uploaded[:60]:
             p = Path(tmp_dir) / f.name
             p.write_bytes(f.read())
             creatives_input.append({
@@ -322,60 +282,83 @@ def page_upload():
             })
 
         progress_bar = st.progress(0, text="Starting...")
-        log_box      = st.empty()
+        status_area  = st.empty()
+        passed_area  = st.empty()
         log_lines    = []
+        passed_count = [0]
+        total_count  = len(creatives_input)
 
         def _log(msg):
             log_lines.append(msg)
-            log_box.markdown("\n\n".join(log_lines[-6:]))
+            # Show last 4 log lines as status
+            status_area.markdown(
+                "\n\n".join(f"`{l}`" for l in log_lines[-4:])
+            )
+            # Update passed count display whenever we get a pass message
+            if "passed quality filter" in msg:
+                try:
+                    n = int(msg.split()[1].split("/")[0])
+                    passed_count[0] = n
+                except Exception:
+                    pass
+                passed_area.markdown(f"""
+                <div class="progress-row">
+                    <span class="progress-label">Images passed quality filter</span>
+                    <span class="progress-count">{passed_count[0]} / {total_count}</span>
+                </div>""", unsafe_allow_html=True)
 
         try:
-            progress_bar.progress(10, text="Agent 1: Scoring...")
-            _log("🔍 Agent 1 running...")
+            progress_bar.progress(10, text="Agent 1: Scoring creatives...")
             a1 = run_agent1(
-                creatives_input  = creatives_input,
-                platform         = platform,
-                product_category = product_category,
-                audience_desc    = audience_desc,
-                groq_api_key     = groq_key,
-                top_k            = top_k,
-                progress_callback= _log,
+                creatives_input   = creatives_input,
+                platform          = platform,
+                product_category  = product_category,
+                audience_desc     = audience_desc,
+                groq_api_key      = _GROQ_KEY,
+                top_k             = top_k,
+                progress_callback = _log,
             )
             if "error" in a1:
-                st.error(f"Agent 1 failed: {a1['error']}")
+                st.error(f"Agent 1: {a1['error']}")
                 return
 
-            progress_bar.progress(40, text="Bandit Agent: Allocating budget...")
-            _log("🎰 Bandit Agent running...")
+            # Show final quality pass summary
+            passed_area.markdown(f"""
+            <div class="progress-row">
+                <span class="progress-label">Images passed quality filter</span>
+                <span class="progress-count">{a1['passed_count']} / {a1['total_count']}</span>
+            </div>""", unsafe_allow_html=True)
+
+            progress_bar.progress(45, text="Bandit Agent: Allocating simulation budget...")
+            _log("🎰 Thompson Sampling budget allocation...")
             bandit = run_bandit(a1["top_k_creatives"])
 
-            progress_bar.progress(60, text="Simulator: Monte Carlo running...")
+            progress_bar.progress(65, text="Simulator: Running Monte Carlo...")
             _log("🎲 Monte Carlo simulation running...")
             sim = run_simulator(
-                agent1_output       = a1,
-                bandit_output       = bandit,
-                budget_per_creative = budget_per,
+                agent1_output        = a1,
+                bandit_output        = bandit,
+                budget_per_creative  = budget_per,
             )
             if "error" in sim:
-                st.error(f"Simulator failed: {sim['error']}")
+                st.error(f"Simulator: {sim['error']}")
                 return
 
-            progress_bar.progress(80, text="Agent 3: Generating brief...")
-            _log("✍️ Generating creative brief...")
+            progress_bar.progress(82, text="Agent 3: Generating creative brief...")
+            _log("✍️ Generating creative brief via Groq...")
             a3 = run_agent3(
-                simulator_output = sim,
-                groq_api_key     = groq_key,
-                progress_callback= _log,
+                simulator_output  = sim,
+                groq_api_key      = _GROQ_KEY,
+                progress_callback = _log,
             )
 
-            # Save to session
-            st.session_state.agent1_out  = a1
-            st.session_state.bandit_out  = bandit
-            st.session_state.sim_out     = sim
-            st.session_state.agent3_out  = a3
+            st.session_state.agent1_out = a1
+            st.session_state.bandit_out = bandit
+            st.session_state.sim_out    = sim
+            st.session_state.agent3_out = a3
 
             progress_bar.progress(100, text="Done!")
-            st.success("✅ Analysis complete!")
+            st.success(f"✅ Analysis complete — {a1['passed_count']} creatives scored!")
             st.session_state.current_page = "results"
             st.rerun()
 
@@ -385,19 +368,18 @@ def page_upload():
 
 
 # ═══════════════════════════════════════════════════════════
-#  PAGE 2 — Leaderboard Results
+#  PAGE 2 — Results
 # ═══════════════════════════════════════════════════════════
 def page_results():
-    sim    = st.session_state.sim_out
-    bandit = st.session_state.bandit_out
-
+    sim = st.session_state.sim_out
     if not sim:
         st.warning("No results yet — run the analysis first.")
         if st.button("← Go to Upload"):
             st.session_state.current_page = "upload"; st.rerun()
         return
 
-    winner    = sim["winner"]
+    winner      = sim["winner"]
+    runner_up   = sim["runner_up"]
     leaderboard = sim["leaderboard"]
 
     st.markdown(f"""
@@ -406,13 +388,12 @@ def page_results():
         <p class="hero-sub">{sim['platform']} &nbsp;·&nbsp; {sim['product_category']}</p>
     </div>""", unsafe_allow_html=True)
 
-    # Metric pills
     sig_short = sim["significance"].split("—")[0].strip()
     st.markdown(f"""
     <div class="metric-row">
         <div class="metric-pill">
             <div class="val">{len(leaderboard)}</div>
-            <div class="lbl">Creatives</div>
+            <div class="lbl">Creatives Tested</div>
         </div>
         <div class="metric-pill">
             <div class="val">{winner['mean_ctr']}%</div>
@@ -427,48 +408,26 @@ def page_results():
             <div class="lbl">Confidence</div>
         </div>
         <div class="metric-pill">
-            <div class="val">{sim['vs_field_confidence']*100:.0f}%</div>
-            <div class="lbl">vs Field</div>
-        </div>
-        <div class="metric-pill">
             <div class="val" style="font-size:0.85rem;padding-top:6px">{sig_short}</div>
             <div class="lbl">Significance</div>
         </div>
     </div>""", unsafe_allow_html=True)
 
-    # Bandit note
-    if bandit and bandit.get("exploration_note"):
-        st.markdown(
-            f'<div class="bandit-chip">🎰 Bandit: {bandit["exploration_note"]}</div>',
-            unsafe_allow_html=True
-        )
-
     if sim["confidence"] < 0.70:
         st.markdown(
             '<div class="tip-box">💡 Low confidence — creatives are visually similar. '
-            'Try more diverse concepts (lifestyle vs product-only vs flat lay).</div>',
+            'Try more diverse concepts for a stronger signal.</div>',
             unsafe_allow_html=True
         )
 
-    # ── Bandit allocation chart ───────────────────────────────────────
-    if bandit:
-        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-        st.markdown('<span class="section-label">Bandit Budget Allocation</span>',
-                    unsafe_allow_html=True)
-        st.pyplot(_plot_bandit_allocation(bandit["allocations"]))
-        st.caption(f"Total simulation runs: {bandit['total_simulations']:,} across {len(bandit['allocations'])} creatives")
-
-    # ── Top-2 head to head ────────────────────────────────────────────
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    # Winner vs Runner-up
     st.markdown('<span class="section-label">Winner vs Runner-Up</span>',
                 unsafe_allow_html=True)
-
-    runner_up = sim["runner_up"]
-    wc, rc    = st.columns(2, gap="large")
+    wc, rc = st.columns(2, gap="large")
 
     for col, var, tag, tag_cls in [
-        (wc, winner,    "🥇 WINNER",    "winner-tag"),
-        (rc, runner_up, "🥈 RUNNER-UP", "runner-tag"),
+        (wc, winner,   "🥇 WINNER",    "winner-tag"),
+        (rc, runner_up,"🥈 RUNNER-UP", "runner-tag"),
     ]:
         with col:
             st.markdown(f'<span class="{tag_cls}">{tag}</span>', unsafe_allow_html=True)
@@ -479,36 +438,31 @@ def page_results():
             m1.metric("CLIP Score", var["clip_score"])
             m2.metric("CTR",        f"{var['mean_ctr']}%")
             m3.metric("ROAS",       f"{var['mean_roas']}x")
-            st.caption(
-                f"Bandit runs: {var['n_simulations']:,} · "
-                f"vs Field: {var['vs_field_confidence']*100:.1f}% · "
-                f"Est. Revenue: Rs.{var['est_revenue_inr']:,}"
-            )
+            st.caption(f"Est. Clicks: {var['est_clicks']} · Revenue: Rs.{var['est_revenue_inr']:,}")
             st.markdown(_score_bar(var["clip_score"]), unsafe_allow_html=True)
 
-    # ── Performance charts ────────────────────────────────────────────
+    # Charts
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-    st.markdown('<span class="section-label">Full Field Performance</span>',
+    st.markdown('<span class="section-label">Performance Charts</span>',
                 unsafe_allow_html=True)
     ch1, ch2 = st.columns(2, gap="large")
-    with ch1: st.pyplot(_plot_leaderboard_chart(leaderboard, "mean_ctr",  "Est. CTR (%)"))
-    with ch2: st.pyplot(_plot_leaderboard_chart(leaderboard, "mean_roas", "Est. ROAS"))
+    with ch1: st.pyplot(_plot_chart(leaderboard, "mean_ctr",  "Est. CTR (%)"))
+    with ch2: st.pyplot(_plot_chart(leaderboard, "mean_roas", "Est. ROAS"))
 
-    # ── Full leaderboard image grid ───────────────────────────────────
+    # Full leaderboard grid
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-    st.markdown('<span class="section-label">Full Leaderboard</span>',
+    st.markdown('<span class="section-label">All Creatives Ranked</span>',
                 unsafe_allow_html=True)
 
-    max_sims    = max(v["n_simulations"] for v in leaderboard)
     cols_per_row = 4
     for row in [leaderboard[i:i+cols_per_row]
                 for i in range(0, len(leaderboard), cols_per_row)]:
         row_cols = st.columns(len(row), gap="small")
         for col, var in zip(row_cols, row):
             with col:
-                medals   = {1:"🥇", 2:"🥈", 3:"🥉"}
+                medals   = {1: "🥇", 2: "🥈", 3: "🥉"}
                 rank_ico = medals.get(var["rank"], f"#{var['rank']}")
-                tag_cls  = {1:"winner-tag", 2:"runner-tag"}.get(var["rank"], "rank-tag")
+                tag_cls  = {1: "winner-tag", 2: "runner-tag"}.get(var["rank"], "rank-tag")
                 st.markdown(
                     f'<span class="{tag_cls}">{rank_ico} #{var["rank"]}</span>',
                     unsafe_allow_html=True
@@ -516,23 +470,14 @@ def page_results():
                 st.markdown(f"**{var['label']}**")
                 if var.get("image"):
                     st.image(var["image"], use_container_width=True)
-                st.caption(
-                    f"Score: {var['clip_score']} · "
-                    f"CTR: {var['mean_ctr']}% · "
-                    f"ROAS: {var['mean_roas']}x"
-                )
+                st.caption(f"Score: {var['clip_score']} · CTR: {var['mean_ctr']}% · ROAS: {var['mean_roas']}x")
                 st.markdown(_score_bar(var["clip_score"]), unsafe_allow_html=True)
-                st.caption(f"Bandit runs: {var['n_simulations']:,}")
-                st.markdown(_bandit_bar(var["n_simulations"], max_sims),
-                            unsafe_allow_html=True)
 
-    # ── Summary table ─────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     st.dataframe(sim["summary_df"], use_container_width=True, hide_index=True)
 
-    # ── Scoring prompts ───────────────────────────────────────────────
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-    st.markdown('<span class="section-label">Platform Scoring Criteria Used</span>',
+    st.markdown('<span class="section-label">Scoring Criteria Used</span>',
                 unsafe_allow_html=True)
     for p in sim.get("scoring_prompts", []):
         st.markdown(f'<span class="chip">💬 {p[:130]}</span>', unsafe_allow_html=True)
@@ -578,8 +523,7 @@ def page_report():
         m2.metric("Est. CTR",   f"{winner['mean_ctr']}%")
         m3.metric("Est. ROAS",  f"{winner['mean_roas']}x")
         st.caption(
-            f"vs Runner-Up confidence: {sim['confidence']*100:.1f}% · "
-            f"vs Whole Field: {sim['vs_field_confidence']*100:.1f}% · "
+            f"Confidence: {sim['confidence']*100:.1f}% · "
             f"Significance: {sim['significance']}"
         )
 
@@ -644,12 +588,12 @@ def page_report():
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
         st.download_button(
-            label            = "⬇️  Download Full PDF Report",
-            data             = pdf_bytes,
-            file_name        = f"creative_ab_v2_{sim['platform'].replace(' ','_')}.pdf",
-            mime             = "application/pdf",
+            label               = "⬇️  Download Full PDF Report",
+            data                = pdf_bytes,
+            file_name           = f"creative_ab_{sim['platform'].replace(' ','_')}.pdf",
+            mime                = "application/pdf",
             use_container_width = True,
-            type             = "primary",
+            type                = "primary",
         )
     else:
         st.warning("PDF not found — try re-running the analysis.")
