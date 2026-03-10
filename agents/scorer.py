@@ -47,9 +47,14 @@ PLATFORM_NORMS = {
     ),
 }
 
+# Images below CLIP_MIN_SIZE are auto-upscaled with LANCZOS before scoring.
+# ViT-B-32 was trained on 224px — upscaling small images gives better embeddings
+# than letting CLIP's internal resize handle it from very low resolution.
+CLIP_MIN_SIZE = 224
+
 QUALITY_THRESHOLDS = {
-    "min_width":      600,
-    "min_height":     600,
+    "min_width":      1,    # no size rejection — upscaling handles small images
+    "min_height":     1,
     "max_blur":       120,
     "min_brightness": 40,
     "max_brightness": 220,
@@ -85,6 +90,23 @@ def _pil_to_cv2_gray(pil_img: Image.Image) -> np.ndarray:
     return cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
 
+def _prepare_for_clip(pil_img: Image.Image) -> Image.Image:
+    """
+    Upscale images smaller than CLIP_MIN_SIZE using LANCZOS.
+    ViT-B-32 processes at 224px internally — upscaling with LANCZOS
+    before passing to CLIP gives sharper embeddings than letting
+    torchvision resize from very low resolution.
+    Leaves images that are already large enough untouched.
+    """
+    w, h = pil_img.size
+    if w < CLIP_MIN_SIZE or h < CLIP_MIN_SIZE:
+        scale = CLIP_MIN_SIZE / min(w, h)
+        new_w = max(int(w * scale), CLIP_MIN_SIZE)
+        new_h = max(int(h * scale), CLIP_MIN_SIZE)
+        return pil_img.resize((new_w, new_h), Image.LANCZOS)
+    return pil_img
+
+
 # ─────────────────────────────────────────────
 #  1. Quality Filter
 # ─────────────────────────────────────────────
@@ -109,10 +131,6 @@ def check_image_quality(img_path: str) -> dict:
     brightness = float(np.mean(gray))
 
     reasons = []
-    if w < QUALITY_THRESHOLDS["min_width"]:
-        reasons.append(f"Width too small ({w}px)")
-    if h < QUALITY_THRESHOLDS["min_height"]:
-        reasons.append(f"Height too small ({h}px)")
     if blur_score < QUALITY_THRESHOLDS["max_blur"]:
         reasons.append(f"Too blurry (score: {blur_score:.1f})")
     if brightness < QUALITY_THRESHOLDS["min_brightness"]:
@@ -323,7 +341,7 @@ def run_agent1(
                 "label":        c.get("label", f"Creative {chr(65 + i)}"),
                 "filename":     Path(c["path"]).name,
                 "path":         c["path"],
-                "image":        result["pil_image"],   # already loaded — no double read
+                "image":        _prepare_for_clip(result["pil_image"]),  # upscale if needed
                 "headline":     c.get("headline", ""),
                 "primary_text": c.get("primary_text", ""),
                 "cta":          c.get("cta", ""),
